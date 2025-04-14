@@ -1,12 +1,18 @@
 import argparse
+import os
+import sys
 from threading import Thread
 import gradio as gr
 from PIL import Image
-from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
+
 from transformers import TextIteratorStreamer
 from functools import partial
 import warnings
 from qwen_vl_utils import process_vision_info
+
+sys.path.append(os.getcwd())
+
+from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
 
 warnings.filterwarnings("ignore")
 
@@ -116,7 +122,7 @@ def main(args):
     with gr.Blocks(fill_height=True) as demo:
         gr.ChatInterface(
             fn=bot_streaming_with_args,
-            title="Qwen2-VL-7B Instruct",
+            title="Qwen2.5-VL-7B Instruct",
             stop_btn="Stop Generation",
             multimodal=True,
             textbox=chat_input,
@@ -130,7 +136,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default=None)
-    parser.add_argument("--model-base", type=str, default="Qwen/Qwen2-VL-7B-Instruct")
+    parser.add_argument("--model-base", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")

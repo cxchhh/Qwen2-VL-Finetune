@@ -15,10 +15,10 @@ export PYTHONPATH=src:$PYTHONPATH
 
 deepspeed src/training/train.py \
     --use_liger True \
-    --deepspeed scripts/zero3_offload.json \
+    --deepspeed scripts/zero2.json \
     --model_id $MODEL_NAME \
-    --data_path /path/to/your/training/data.json \
-    --image_folder /path/to/your/image/folder \
+    --data_path /mnt/afs/chenxuchuan/datasets/qwen_ft/dataset.json \
+    --image_folder /mnt/afs/chenxuchuan/datasets/qwen_ft/imgs \
     --remove_unused_columns False \
     --freeze_vision_tower False \
     --freeze_llm False \
@@ -32,7 +32,7 @@ deepspeed src/training/train.py \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --image_min_pixels $((512 * 28 * 28)) \
     --image_max_pixels $((1280 * 28 * 28)) \
-    --learning_rate 1e-5 \
+    --learning_rate 3e-6 \
     --merger_lr 1e-5 \
     --vision_lr 2e-6 \
     --weight_decay 0.1 \
