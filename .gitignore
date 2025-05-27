@@ -168,3 +168,6 @@ scripts_tmp/
 logs/*.log
 
 testing.ipynb
+*_log/
+.gradio/
+*.mp4

@@ -10,11 +10,12 @@ from functools import partial
 import warnings
 from qwen_vl_utils import process_vision_info
 
-sys.path.append(os.getcwd())
-
 from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
 
 warnings.filterwarnings("ignore")
+
+os.environ['GRADIO_TEMP_DIR'] = os.path.expanduser("~/.tmp")
+os.environ['GRADIO_ALLOWED_PATHS'] = os.path.expanduser("~")
 
 def is_video_file(filename):
     video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.mpeg']
@@ -83,7 +84,71 @@ def bot_streaming(message, history, generation_args):
     buffer = ""
     for new_text in streamer:
         buffer += new_text
-        yield buffer
+        # yield buffer
+    thread.join()
+    return buffer
+
+def bot_generate_once(message, history, generation_args):
+    images = []
+    videos = []
+
+    if message["files"]:
+        for file_item in message["files"]:
+            if isinstance(file_item, dict):
+                file_path = file_item["path"]
+            else:
+                file_path = file_item
+            if is_video_file(file_path):
+                videos.append(file_path)
+            else:
+                images.append(file_path)
+
+    conversation = []
+    for user_turn, assistant_turn in history:
+        user_content = []
+        if isinstance(user_turn, tuple):
+            file_paths = user_turn[0]
+            user_text = user_turn[1]
+            if not isinstance(file_paths, list):
+                file_paths = [file_paths]
+            for file_path in file_paths:
+                if is_video_file(file_path):
+                    user_content.append({"type": "video", "video": file_path, "fps": 1.0})
+                else:
+                    user_content.append({"type": "image", "image": file_path})
+            if user_text:
+                user_content.append({"type": "text", "text": user_text})
+        else:
+            user_content.append({"type": "text", "text": user_turn})
+        conversation.append({"role": "user", "content": user_content})
+
+        if assistant_turn is not None:
+            assistant_content = [{"type": "text", "text": assistant_turn}]
+            conversation.append({"role": "assistant", "content": assistant_content})
+
+    user_content = []
+    for image in images:
+        user_content.append({"type": "image", "image": image})
+    for video in videos:
+        user_content.append({"type": "video", "video": video, "fps": 1.0})
+    user_text = message["text"]
+    if user_text:
+        user_content.append({"type": "text", "text": user_text})
+    conversation.append({"role": "user", "content": user_content})
+
+    prompt = processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(conversation)
+
+    inputs = processor(
+        text=[prompt], images=image_inputs, videos=video_inputs,
+        padding=True, return_tensors="pt"
+    ).to(device)
+    
+    generation_kwargs = dict(inputs, eos_token_id=processor.tokenizer.eos_token_id, **generation_args)
+    output_ids = model.generate(**generation_kwargs)
+    output_text = processor.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    return output_text
 
 def main(args):
 
@@ -106,9 +171,7 @@ def main(args):
                                                 device=args.device, use_flash_attn=use_flash_attn
     )
 
-    chatbot = gr.Chatbot(scale=2)
-    chat_input = gr.MultimodalTextbox(interactive=True, file_types=["image", "video"], placeholder="Enter message or upload file...",
-                                  show_label=False)
+    
     
     generation_args = {
         "max_new_tokens": args.max_new_tokens,
@@ -117,6 +180,9 @@ def main(args):
         "repetition_penalty": args.repetition_penalty,
     }
     
+    chatbot = gr.Chatbot(scale=2)
+    chat_input = gr.MultimodalTextbox(interactive=True, file_types=["image", "video"], placeholder="Enter message or upload file...",
+                                  show_label=False)
     bot_streaming_with_args = partial(bot_streaming, generation_args=generation_args)
 
     with gr.Blocks(fill_height=True) as demo:
@@ -128,10 +194,21 @@ def main(args):
             textbox=chat_input,
             chatbot=chatbot,
         )
+        # gr.Interface(
+        #     fn=partial(bot_generate_once, generation_args=generation_args),
+        #     inputs=[
+        #         gr.JSON(label="Message"),
+        #         # gr.JSON(label="History"),
+        #     ],
+        #     outputs=gr.Textbox(label="Output"),
+        #     api_name="chat"
+        # )
 
 
-    demo.queue(api_open=False)
-    demo.launch(show_api=False, share=False, server_name='0.0.0.0')
+    # Based on the scene, reason about the operations needed to complete '{lang}', output in json format
+
+    demo = demo.queue(api_open=True)
+    demo.launch(show_api=True, share=False, server_name='localhost', allowed_paths=[os.path.expanduser("~")])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -142,8 +219,9 @@ if __name__ == "__main__":
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--disable_flash_attention", action="store_true")
     parser.add_argument("--temperature", type=float, default=0)
-    parser.add_argument("--repetition-penalty", type=float, default=1.0)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(args)
+    

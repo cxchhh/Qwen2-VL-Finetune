@@ -13,11 +13,13 @@ GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 
 export PYTHONPATH=src:$PYTHONPATH
 
-deepspeed src/training/train.py \
+deepspeed src/training/train_judge.py \
     --use_liger True \
     --deepspeed scripts/zero2.json \
     --model_id $MODEL_NAME \
-    --data_path /mnt/afs/chenxuchuan/datasets/qwen_ft/dataset.json \
+    --data_path /mnt/afs/chenxuchuan/datasets/qwen_ft/debug/judge.json \
+    --val_data_path /mnt/afs/chenxuchuan/datasets/qwen_ft/debug/judge_val.json \
+    --calvin_datasets_dir /mnt/afs/chenxuchuan/datasets/calvin/calvin_debug_dataset \
     --image_folder /mnt/afs/chenxuchuan/datasets/qwen_ft/imgs \
     --remove_unused_columns False \
     --freeze_vision_tower False \
@@ -26,12 +28,10 @@ deepspeed src/training/train.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
-    --output_dir output/fft_0912 \
-    --num_train_epochs 1 \
+    --output_dir output/judge_debug \
+    --num_train_epochs 400 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
-    --image_min_pixels $((512 * 28 * 28)) \
-    --image_max_pixels $((1280 * 28 * 28)) \
     --learning_rate 2e-6 \
     --merger_lr 1e-5 \
     --vision_lr 2e-6 \
@@ -43,7 +43,7 @@ deepspeed src/training/train.py \
     --gradient_checkpointing True \
     --report_to tensorboard \
     --lazy_preprocess True \
-    --save_strategy "steps" \
-    --save_steps 200 \
-    --save_total_limit 10 \
+    --save_strategy "epoch" \
+    --save_steps 1000 \
+    --save_total_limit 1 \
     --dataloader_num_workers 4

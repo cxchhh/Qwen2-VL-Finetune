@@ -55,6 +55,10 @@ class TrainingArguments(TrainingArguments):
     lora_namespan_exclude: str = field(default=None, metadata={"help": "List of namespan to exclude for LoRA"})
     num_lora_modules: int = -1
     use_liger: bool = True
+    
+    evaluation_strategy="epoch",  # 或 "epoch"
+    eval_steps=1,
+    shuffle: bool = True,
 
 
 @dataclass
@@ -64,6 +68,27 @@ class DataArguments:
     )
     lazy_preprocess: bool = False
     image_folder: Optional[str] = field(default=None)
+    image_min_pixels: Optional[int] = field(default=3136)
+    image_max_pixels: Optional[int] = field(default=12845056)
+    video_min_pixels: Optional[int] = field(default=100352)
+    video_max_pixels: Optional[int] = field(default=602112)
+    image_resized_width: int = field(default=None)
+    image_resized_height: int = field(default=None)
+    video_resized_width: int = field(default=None)
+    video_resized_height: int = field(default=None)
+    fps: float = 1.0
+
+@dataclass
+class JudgeDataArguments:
+    data_path: str = field(
+        default=None, metadata={"help": "Path to the training data."}
+    )
+    val_data_path: str = field(
+        default=None, metadata={"help": "Path to the training data."}
+    )
+    lazy_preprocess: bool = False
+    image_folder: Optional[str] = field(default=None)
+    calvin_datasets_dir: Optional[str] = field(default=None)
     image_min_pixels: Optional[int] = field(default=3136)
     image_max_pixels: Optional[int] = field(default=12845056)
     video_min_pixels: Optional[int] = field(default=100352)

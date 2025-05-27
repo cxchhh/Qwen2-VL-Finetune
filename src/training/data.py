@@ -1,7 +1,13 @@
+import base64
 import copy
+import io
+from itertools import chain
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict
+import numpy as np
+from omegaconf import DictConfig
 import torch
 import transformers
 import ujson as json
@@ -10,8 +16,12 @@ from qwen_vl_utils import process_vision_info
 from PIL import Image
 import re
 
-from .params import DataArguments
-from .constants import *
+if __name__ == "__main__":
+    from params import DataArguments, JudgeDataArguments
+    from constants import *
+else:
+    from training.params import DataArguments, JudgeDataArguments
+    from training.constants import *
 
 def truncate_sequence(input_ids, labels, max_length, eos_token_id):
     if input_ids.size(0) > max_length:
@@ -264,6 +274,255 @@ class SupervisedDataset(Dataset):
         
         return data_dict
 
+
+obs_config = DictConfig(
+    {
+        "rgb_obs": ["rgb_static", "rgb_gripper"],
+        "depth_obs": [],
+        "state_obs": ["robot_obs"],
+        "actions": ["rel_actions"],
+        "language": ["language"],
+    }
+)
+
+class SupervisedJudgeDataset(Dataset):
+    """Dataset for supervised fine-tuning."""
+
+    def __init__(
+        self,
+        data_path: str | list,
+        processor: transformers.ProcessorMixin,
+        data_args: JudgeDataArguments,
+        model_id,
+        padding=True,
+        val=False
+    ):
+        super(SupervisedJudgeDataset, self).__init__()
+        if isinstance(data_path, str):
+            list_data_dict = json.load(open(data_path, "r"))
+        else:
+            list_data_dict = data_path
+
+        self.model_id = model_id
+        self.processor = processor
+        self.list_data_dict = list_data_dict
+        self.data_args = data_args
+        self.padding = padding
+        self.image_min_pixel = data_args.image_min_pixels
+        self.image_max_pixel = data_args.image_max_pixels
+        self.video_min_pixel = data_args.video_min_pixels
+        self.video_max_pixel = data_args.video_max_pixels
+        self.image_resized_w = data_args.image_resized_width
+        self.image_resized_h = data_args.image_resized_height
+        self.video_resized_w = data_args.video_resized_width
+        self.video_resized_h = data_args.video_resized_height
+        self.fps = data_args.fps
+
+        if val:
+            self.calvin_datasets_dir = Path(data_args.calvin_datasets_dir) / "validation"
+        else:
+            self.calvin_datasets_dir = Path(data_args.calvin_datasets_dir) / "training"
+
+        self.init_calvin_dataset()
+
+    def init_calvin_dataset(self):
+        calvin_datasets_dir = self.calvin_datasets_dir 
+        try:
+            print(
+                "trying to load lang data from: ",
+                calvin_datasets_dir / "lang_annotations" / "auto_lang_ann.npy",
+            )
+            lang_data = np.load(
+                calvin_datasets_dir / "lang_annotations" / "auto_lang_ann.npy",
+                allow_pickle=True,
+            ).item()
+        except Exception:
+            print(
+                "Exception, trying to load lang data from: ",
+                calvin_datasets_dir / "auto_lang_ann.npy",
+            )
+            lang_data = np.load(
+                calvin_datasets_dir / "auto_lang_ann.npy", allow_pickle=True
+            ).item()
+
+        self.keys = list(chain(*obs_config.values()))
+        self.keys.remove('language')
+        self.keys.append("scene_obs")
+
+        self.indx = lang_data["info"]["indx"]
+
+    def load_npz(self, filename: Path) -> Dict[str, np.ndarray]:
+        return np.load(filename.as_posix())
+
+    
+
+    def __len__(self):
+        return len(self.list_data_dict)
+
+    def __getitem__(self, i, mapping=False) -> Dict[str, torch.Tensor]:
+        sources = self.list_data_dict[i]
+
+        is_video = False
+
+        processor = self.processor
+        if "image_id" in sources:
+            videos = None
+            grid_key = "image_grid_thw"
+            pixel_key = "pixel_values"
+            
+            image_files = sources["image_id"]
+            image_folder = self.data_args.image_folder
+
+            if isinstance(image_files, str):
+                image_files = [image_files]
+
+            images = []
+            
+
+            image_file = image_files[0]
+            if mapping:
+                id = int(i) // 1000
+                frame_id = int(i) % 1000
+            else:
+                id = int(image_file) // 1000
+                frame_id = int(image_file) % 1000
+            episodes = [
+                self.load_npz(self.calvin_datasets_dir/f"episode_{file_idx:07d}.npz") for file_idx in range(*self.indx[id])
+            ]
+            episode = {key: np.stack([ep[key] for ep in episodes]) for key in self.keys}
+
+            n_frames = episode['rgb_static'].shape[0]
+
+            rgb_primary = episode['rgb_static'][min(frame_id, n_frames - 1)]
+            rgb_gripper = episode['rgb_gripper'][min(frame_id, n_frames - 1)]
+            rgb_primary_bytes = self.numpy_to_base64(rgb_primary)
+            rgb_gripper_bytes = self.numpy_to_base64(rgb_gripper)
+            images.append(get_image_info(rgb_primary_bytes, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+            images.append(get_image_info(rgb_gripper_bytes, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+            
+        elif "video" in sources:
+            is_video = True
+            images=None
+            grid_key = "video_grid_thw"
+            pixel_key = "pixel_values_videos"
+
+            video_files = sources["video"]
+            video_folder = self.data_args.image_folder
+
+            if isinstance(video_files, str):
+                video_files = [video_files]
+
+            videos = []
+            for video_file in video_files:
+                if not os.path.exists(video_file):
+                    if not video_file.startswith("http"):
+                        video_file = os.path.join(video_folder, video_file)
+                video_input, video_kwargs = get_video_info(video_file, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, self.data_args.fps)
+                videos.append(video_input)
+        else:
+            grid_key = None
+            pixel_key = None
+            images=None
+            videos=None
+
+        sources = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
+
+        all_input_ids = [] 
+        all_labels = []
+        all_pixel_values = []
+        all_image_grid_thw = []
+        all_second_gird = []
+
+        # Qwen2-VL uses a default system message so I've added this.
+        if len(SYSTEM_MESSAGE) > 0:
+            system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+            system_message_input_ids = processor.tokenizer(system_message, add_special_tokens=False, return_tensors='pt')['input_ids']
+            system_labels = torch.full_like(system_message_input_ids, IGNORE_INDEX) 
+            
+            all_input_ids.append(system_message_input_ids.squeeze(0))
+            all_labels.append(system_labels.squeeze(0))
+
+        for _, j in enumerate(range(0, len(sources), 2)):
+            user_input = sources[j]
+            gpt_response = sources[j + 1]
+
+            user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
+            gpt_response = f"{gpt_response['content']}{DEFAULT_IM_END_TOKEN}\n"
+            
+            if DEFAULT_IMAGE_TOKEN in user_input:
+                inputs = processor(text=[user_input], images=images, videos=videos, padding=False, return_tensors='pt')
+                prompt_input_ids = inputs['input_ids']
+                all_pixel_values.append(inputs[pixel_key])
+                all_image_grid_thw.append(inputs[grid_key])
+            
+            elif DEFAULT_VIDEO_TOKEN in user_input:
+                if "Qwen2.5" in self.model_id:
+                    inputs = processor(text=[user_input], images=images, videos=videos, padding=False, return_tensors='pt', **video_kwargs)
+                    all_second_gird.extend(inputs["second_per_grid_ts"])
+                else:
+                    inputs = processor(text=[user_input], images=images, videos=videos, padding=False, return_tensors='pt')
+                prompt_input_ids = inputs['input_ids']
+                all_pixel_values.append(inputs[pixel_key])
+                all_image_grid_thw.append(inputs[grid_key])
+
+            else:
+                prompt_input_ids = processor.tokenizer(user_input, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+
+            response_input_ids = processor.tokenizer(gpt_response, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+
+            input_ids = torch.cat([prompt_input_ids, response_input_ids], dim=1).squeeze(0)
+            labels = torch.cat(
+                [
+                    torch.tensor([IGNORE_INDEX] * len(prompt_input_ids[0])),  
+                    response_input_ids.squeeze(0),
+                ],
+                dim=0,
+            )
+
+            all_input_ids.append(input_ids)
+            all_labels.append(labels)
+        
+        # There is no need for eos or bos tokens in the input_ids
+        # Qwen2-VL does not use them
+        input_ids = torch.cat(all_input_ids, dim=0).to(torch.long)
+        labels = torch.cat(all_labels, dim=0).to(torch.long)
+
+        # eos_token_id = processor.tokenizer.convert_tokens_to_ids(DEFAULT_IM_END_TOKEN)
+        # input_ids, labels = truncate_sequence(input_ids, labels, self.max_length, eos_token_id)
+
+        attention_mask = (input_ids > -1000000).to(torch.long)
+
+        data_dict = dict(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+
+        if pixel_key and grid_key:
+            pixel_values = torch.cat(all_pixel_values, dim=0)
+            image_thw = torch.cat(all_image_grid_thw, dim=0)
+            data_dict[pixel_key] = pixel_values
+            data_dict[grid_key] = image_thw
+
+        if len(all_second_gird) > 0:
+            second_gird = all_second_gird
+            data_dict["second_per_grid_ts"] = second_gird
+        
+        return data_dict
+
+    @classmethod
+    def numpy_to_base64(self, np_image: np.ndarray, format: str = "PNG") -> str:
+        image = Image.fromarray(np_image)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format=format)
+        buffer.seek(0)
+
+        img_bytes = buffer.read()
+        base64_str = base64.b64encode(img_bytes).decode("utf-8")
+
+        return f"data:image/{format.lower()};base64,{base64_str}"
+    
 class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
 
@@ -359,3 +618,40 @@ def make_supervised_data_module(model_id, processor, data_args):
     return dict(train_dataset=sft_dataset,
                 eval_dataset=None,
                 data_collator=data_collator)
+
+def make_supervised_judge_data_module(model_id, processor, data_args):
+    """Make dataset and collator for supervised fine-tuning."""
+    sft_dataset = SupervisedJudgeDataset(
+        data_path=data_args.data_path, processor=processor, data_args=data_args, model_id=model_id, val=False
+    )
+
+    val_sft_dataset = SupervisedJudgeDataset(
+        data_path=data_args.val_data_path, processor=processor, data_args=data_args, model_id=model_id, val=True
+    )
+
+    data_collator = DataCollatorForSupervisedDataset(pad_token_id=processor.tokenizer.pad_token_id)
+
+    return dict(train_dataset=sft_dataset,
+                eval_dataset=val_sft_dataset,
+                data_collator=data_collator)
+
+
+if __name__ == "__main__":
+    from transformers import AutoProcessor
+    model_id = "Qwen/Qwen2.5-VL-3B-Instruct"
+    data_args = JudgeDataArguments(
+        data_path="/mnt/afs/chenxuchuan/datasets/qwen_ft/debug/judge.json",
+        val_data_path="/mnt/afs/chenxuchuan/datasets/qwen_ft/debug/judge_val.json",
+        calvin_datasets_dir="/mnt/afs/chenxuchuan/datasets/calvin/calvin_debug_dataset",
+        image_folder="/mnt/afs/chenxuchuan/datasets/qwen_ft/imgs",
+        lazy_preprocess=True
+    )
+    sft_dataset = SupervisedJudgeDataset(
+        data_path="/mnt/afs/chenxuchuan/datasets/qwen_ft/debug/judge.json",
+        processor=AutoProcessor.from_pretrained(model_id,
+                                            # The default setting is padding_side="left"
+                                            # When training using the right-side padding is more efficient.
+                                              padding_side="right"), data_args=data_args, model_id=model_id
+    )
+    data = sft_dataset[0]
+    breakpoint()
